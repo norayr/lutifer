@@ -17,24 +17,24 @@ uses
   MTProcs;
 
 type
-  TClutColors = array[0..7] of TFPColor;
+  TFastPixel = packed record
+    R, G, B, A: Byte;
+  end;
+
+  TFastPixelArray = array of TFastPixel;
 
   PHaldWork = ^THaldWork;
   THaldWork = record
-    SrcImg: TFPCustomImage;
-    ClutImg: TFPCustomImage;
+    Pixels: ^TFastPixelArray;
+    Lut: ^TFastPixelArray;
     Range: Integer;
-    Width: Integer;
-    Height: Integer;
     PixelCount: PtrInt;
     BlockSize: PtrInt;
   end;
 
-function ClampByte(AValue: Integer): Byte; inline;
+function ByteToWord(AValue: Byte): Word; inline;
 begin
-  if AValue < 0 then Result := 0
-  else if AValue > 255 then Result := 255
-  else Result := AValue;
+  Result := (Word(AValue) shl 8) or AValue;
 end;
 
 function FPToByte(AValue: Word): Byte; inline;
@@ -42,40 +42,48 @@ begin
   Result := AValue shr 8;
 end;
 
-function ByteToWord(AValue: Byte): Word; inline;
+function FPColorToFast(const C: TFPColor): TFastPixel; inline;
 begin
-  Result := (Word(AValue) shl 8) or AValue;
+  Result.R := FPToByte(C.Red);
+  Result.G := FPToByte(C.Green);
+  Result.B := FPToByte(C.Blue);
+  Result.A := FPToByte(C.Alpha);
 end;
 
-function InterpolateColor(const C1, C2: TFPColor; T: Double): TFPColor; inline;
-var
-  R, G, B, A: Integer;
+function FastToFPColor(const P: TFastPixel): TFPColor; inline;
 begin
-  R := Round(FPToByte(C1.Red)   * (1.0 - T) + FPToByte(C2.Red)   * T);
-  G := Round(FPToByte(C1.Green) * (1.0 - T) + FPToByte(C2.Green) * T);
-  B := Round(FPToByte(C1.Blue)  * (1.0 - T) + FPToByte(C2.Blue)  * T);
-  A := Round(FPToByte(C1.Alpha) * (1.0 - T) + FPToByte(C2.Alpha) * T);
-
-  Result.Red   := ByteToWord(ClampByte(R));
-  Result.Green := ByteToWord(ClampByte(G));
-  Result.Blue  := ByteToWord(ClampByte(B));
-  Result.Alpha := ByteToWord(ClampByte(A));
+  Result.Red := ByteToWord(P.R);
+  Result.Green := ByteToWord(P.G);
+  Result.Blue := ByteToWord(P.B);
+  Result.Alpha := ByteToWord(P.A);
 end;
 
-function TrilinearInterpolate(FracR, FracG, FracB: Double;
-  const Points: TClutColors): TFPColor;
-var
-  C00, C01, C10, C11, C0, C1: TFPColor;
+function LerpByte(A, B, T: Integer): Byte; inline;
 begin
-  C00 := InterpolateColor(Points[0], Points[1], FracR);
-  C01 := InterpolateColor(Points[2], Points[3], FracR);
-  C10 := InterpolateColor(Points[4], Points[5], FracR);
-  C11 := InterpolateColor(Points[6], Points[7], FracR);
+  // T is 0..255. This is integer linear interpolation with rounding.
+  Result := (A * (255 - T) + B * T + 127) div 255;
+end;
 
-  C0 := InterpolateColor(C00, C01, FracG);
-  C1 := InterpolateColor(C10, C11, FracG);
+function LerpPixel(const A, B: TFastPixel; T: Integer): TFastPixel; inline;
+begin
+  Result.R := LerpByte(A.R, B.R, T);
+  Result.G := LerpByte(A.G, B.G, T);
+  Result.B := LerpByte(A.B, B.B, T);
+  Result.A := LerpByte(A.A, B.A, T);
+end;
 
-  Result := InterpolateColor(C0, C1, FracB);
+function TrilinearInteger(const C000, C100, C010, C110,
+  C001, C101, C011, C111: TFastPixel; FR, FG, FB: Integer): TFastPixel; inline;
+var
+  C00, C01, C10, C11, C0, C1: TFastPixel;
+begin
+  C00 := LerpPixel(C000, C100, FR);
+  C01 := LerpPixel(C010, C110, FR);
+  C10 := LerpPixel(C001, C101, FR);
+  C11 := LerpPixel(C011, C111, FR);
+  C0 := LerpPixel(C00, C01, FG);
+  C1 := LerpPixel(C10, C11, FG);
+  Result := LerpPixel(C0, C1, FB);
 end;
 
 procedure ClutPoint(X, Y, Z, Range, W, H: Integer; out PX, PY: Integer); inline;
@@ -88,27 +96,6 @@ begin
   if PY >= H then PY := H - 1;
 end;
 
-function FetchClutColors(ClutImg: TFPCustomImage; Range: Integer;
-  R, G, B: Double): TClutColors;
-var
-  X, Y, Z, XN, YN, ZN: Integer;
-  PX, PY: Integer;
-begin
-  X := Floor(R); Y := Floor(G); Z := Floor(B);
-  XN := Min(X + 1, Range - 1);
-  YN := Min(Y + 1, Range - 1);
-  ZN := Min(Z + 1, Range - 1);
-
-  ClutPoint(X,  Y,  Z,  Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[0] := ClutImg.Colors[PX, PY];
-  ClutPoint(XN, Y,  Z,  Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[1] := ClutImg.Colors[PX, PY];
-  ClutPoint(X,  YN, Z,  Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[2] := ClutImg.Colors[PX, PY];
-  ClutPoint(XN, YN, Z,  Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[3] := ClutImg.Colors[PX, PY];
-  ClutPoint(X,  Y,  ZN, Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[4] := ClutImg.Colors[PX, PY];
-  ClutPoint(XN, Y,  ZN, Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[5] := ClutImg.Colors[PX, PY];
-  ClutPoint(X,  YN, ZN, Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[6] := ClutImg.Colors[PX, PY];
-  ClutPoint(XN, YN, ZN, Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[7] := ClutImg.Colors[PX, PY];
-end;
-
 function HaldClutRange(AHaldClut: TFPCustomImage): Integer;
 var
   Pixels: Double;
@@ -116,7 +103,6 @@ begin
   Result := 0;
   if (AHaldClut = nil) or (AHaldClut.Width <= 0) or (AHaldClut.Height <= 0) then
     Exit;
-
   Pixels := Double(AHaldClut.Width) * Double(AHaldClut.Height);
   Result := Round(Power(Pixels, 1.0 / 3.0));
 end;
@@ -130,30 +116,98 @@ begin
       Int64(AHaldClut.Width) * Int64(AHaldClut.Height));
 end;
 
-procedure ApplyHaldClutToPixel(Work: PHaldWork; PixelIndex: PtrInt); inline;
+procedure LoadImageToFast(AImage: TFPCustomImage; out Pixels: TFastPixelArray);
 var
-  X, Y: Integer;
-  SrcPixel, FinalColor: TFPColor;
-  R, G, B, FracR, FracG, FracB: Double;
-  Points: TClutColors;
+  X, Y, W, H: Integer;
+  I: PtrInt;
 begin
-  X := PixelIndex mod Work^.Width;
-  Y := PixelIndex div Work^.Width;
+  W := AImage.Width;
+  H := AImage.Height;
+  SetLength(Pixels, PtrInt(W) * PtrInt(H));
+  I := 0;
+  for Y := 0 to H - 1 do
+    for X := 0 to W - 1 do
+    begin
+      Pixels[I] := FPColorToFast(AImage.Colors[X, Y]);
+      Inc(I);
+    end;
+end;
 
-  SrcPixel := Work^.SrcImg.Colors[X, Y];
+procedure StoreFastToImage(const Pixels: TFastPixelArray; AImage: TFPCustomImage);
+var
+  X, Y, W, H: Integer;
+  I: PtrInt;
+begin
+  W := AImage.Width;
+  H := AImage.Height;
+  I := 0;
+  for Y := 0 to H - 1 do
+    for X := 0 to W - 1 do
+    begin
+      AImage.Colors[X, Y] := FastToFPColor(Pixels[I]);
+      Inc(I);
+    end;
+end;
 
-  R := (FPToByte(SrcPixel.Red)   / 255.0) * (Work^.Range - 1);
-  G := (FPToByte(SrcPixel.Green) / 255.0) * (Work^.Range - 1);
-  B := (FPToByte(SrcPixel.Blue)  / 255.0) * (Work^.Range - 1);
+procedure LoadHaldToCube(AHaldClut: TFPCustomImage; Range: Integer; out Lut: TFastPixelArray);
+var
+  X, Y, Z, PX, PY, Idx: Integer;
+begin
+  SetLength(Lut, Range * Range * Range);
+  for Z := 0 to Range - 1 do
+    for Y := 0 to Range - 1 do
+      for X := 0 to Range - 1 do
+      begin
+        Idx := X + Range * (Y + Range * Z);
+        ClutPoint(X, Y, Z, Range, AHaldClut.Width, AHaldClut.Height, PX, PY);
+        Lut[Idx] := FPColorToFast(AHaldClut.Colors[PX, PY]);
+      end;
+end;
 
-  FracR := Frac(R);
-  FracG := Frac(G);
-  FracB := Frac(B);
+procedure ApplyHaldClutToFastPixel(Work: PHaldWork; PixelIndex: PtrInt); inline;
+var
+  Src, Dst: TFastPixel;
+  RV, GV, BV: Integer;
+  X, Y, Z, XN, YN, ZN: Integer;
+  FR, FG, FB: Integer;
+  Rng, Rng2: Integer;
+  Base000, Base001: Integer;
+  Lut: ^TFastPixelArray;
+begin
+  Src := Work^.Pixels^[PixelIndex];
+  Rng := Work^.Range;
+  Rng2 := Rng * Rng;
+  Lut := Work^.Lut;
 
-  Points := FetchClutColors(Work^.ClutImg, Work^.Range, R, G, B);
-  FinalColor := TrilinearInterpolate(FracR, FracG, FracB, Points);
-  FinalColor.Alpha := SrcPixel.Alpha;
-  Work^.SrcImg.Colors[X, Y] := FinalColor;
+  RV := Src.R * (Rng - 1);
+  GV := Src.G * (Rng - 1);
+  BV := Src.B * (Rng - 1);
+
+  X := RV div 255; FR := RV mod 255;
+  Y := GV div 255; FG := GV mod 255;
+  Z := BV div 255; FB := BV mod 255;
+
+  if X >= Rng - 1 then begin XN := X; FR := 0; end else XN := X + 1;
+  if Y >= Rng - 1 then begin YN := Y; FG := 0; end else YN := Y + 1;
+  if Z >= Rng - 1 then begin ZN := Z; FB := 0; end else ZN := Z + 1;
+
+  Base000 := X + Rng * Y + Rng2 * Z;
+  Base001 := X + Rng * Y + Rng2 * ZN;
+
+  Dst := TrilinearInteger(
+    Lut^[Base000],
+    Lut^[XN + Rng * Y  + Rng2 * Z],
+    Lut^[X  + Rng * YN + Rng2 * Z],
+    Lut^[XN + Rng * YN + Rng2 * Z],
+    Lut^[Base001],
+    Lut^[XN + Rng * Y  + Rng2 * ZN],
+    Lut^[X  + Rng * YN + Rng2 * ZN],
+    Lut^[XN + Rng * YN + Rng2 * ZN],
+    FR, FG, FB
+  );
+
+  Dst.A := Src.A;
+  Work^.Pixels^[PixelIndex] := Dst;
 end;
 
 procedure ApplyHaldClutBlock(Index: PtrInt; Data: Pointer; Item: TMultiThreadProcItem);
@@ -164,14 +218,23 @@ begin
   Work := PHaldWork(Data);
   if Work = nil then Exit;
 
-  Item.CalcBlock(Index, Work^.BlockSize, Work^.PixelCount, StartIndex, EndIndex);
+  if Item <> nil then
+    Item.CalcBlock(Index, Work^.BlockSize, Work^.PixelCount, StartIndex, EndIndex)
+  else
+  begin
+    StartIndex := 0;
+    EndIndex := Work^.PixelCount - 1;
+  end;
+
   for P := StartIndex to EndIndex do
-    ApplyHaldClutToPixel(Work, P);
+    ApplyHaldClutToFastPixel(Work, P);
 end;
 
 procedure ApplyHaldClut(AImage, AHaldClut: TFPCustomImage);
 var
   Work: THaldWork;
+  Pixels: TFastPixelArray;
+  Lut: TFastPixelArray;
   BlockCount, BlockSize: PtrInt;
 begin
   if (AImage = nil) or (AHaldClut = nil) then Exit;
@@ -182,14 +245,12 @@ begin
     raise Exception.CreateFmt('LUT dimensions do not look like a Hald CLUT: %dx%d',
       [AHaldClut.Width, AHaldClut.Height]);
 
-  Work.SrcImg := AImage;
-  Work.ClutImg := AHaldClut;
-  Work.Width := AImage.Width;
-  Work.Height := AImage.Height;
-  Work.PixelCount := PtrInt(AImage.Width) * PtrInt(AImage.Height);
+  LoadImageToFast(AImage, Pixels);
+  LoadHaldToCube(AHaldClut, Work.Range, Lut);
 
-  if Work.PixelCount <= 0 then Exit;
-
+  Work.Pixels := @Pixels;
+  Work.Lut := @Lut;
+  Work.PixelCount := Length(Pixels);
   ProcThreadPool.CalcBlockSize(Work.PixelCount, BlockCount, BlockSize);
   Work.BlockSize := BlockSize;
 
@@ -197,6 +258,8 @@ begin
     ApplyHaldClutBlock(0, @Work, nil)
   else
     ProcThreadPool.DoParallel(@ApplyHaldClutBlock, 0, BlockCount - 1, @Work);
+
+  StoreFastToImage(Pixels, AImage);
 end;
 
 end.
