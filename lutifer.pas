@@ -6,9 +6,7 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  Interfaces,
   Classes, SysUtils, Math,
-  Graphics,
   FPImage,
   FPReadPNG, FPReadJPEG, FPReadBMP, FPReadGIF, FPReadTIFF,
   FPWritePNG, FPWriteJPEG, FPWriteBMP,
@@ -18,6 +16,7 @@ const
   ExitOK = 0;
   ExitUsage = 1;
   ExitFailure = 2;
+  DefaultJPEGQuality = 92;
 
 type
   TOptions = record
@@ -25,6 +24,7 @@ type
     LutFile: String;
     OutputFile: String;
     Verbose: Boolean;
+    JPEGQuality: Integer;
   end;
 
 procedure PrintUsage;
@@ -32,14 +32,16 @@ begin
   WriteLn('lutifer - apply a Hald CLUT PNG to an image');
   WriteLn;
   WriteLn('Usage:');
-  WriteLn('  lutifer -i input.jpg -l lut.png -o out.png');
+  WriteLn('  lutifer -i input.jpg -l lut.png -o out.jpg');
+  WriteLn('  lutifer input.jpg lut.png out.jpg');
   WriteLn;
   WriteLn('Options:');
-  WriteLn('  -i, --input FILE     input image');
-  WriteLn('  -l, --lut FILE       Hald CLUT image, usually PNG');
-  WriteLn('  -o, --output FILE    output image');
-  WriteLn('  -v, --verbose        print progress messages');
-  WriteLn('  -h, --help           show this help');
+  WriteLn('  -i, --input FILE       input image');
+  WriteLn('  -l, --lut FILE         Hald CLUT image, usually PNG');
+  WriteLn('  -o, --output FILE      output image');
+  WriteLn('  -q, --quality N        JPEG quality, 1..100; default ', DefaultJPEGQuality);
+  WriteLn('  -v, --verbose          print progress messages');
+  WriteLn('  -h, --help             show this help');
   WriteLn;
   WriteLn('Output format is inferred from the output extension: .png, .jpg/.jpeg, .bmp.');
 end;
@@ -62,12 +64,21 @@ begin
     FailUsage('empty value after ' + Opt);
 end;
 
+function ParseQuality(const S: String): Integer;
+begin
+  if not TryStrToInt(S, Result) then
+    FailUsage('JPEG quality must be a number from 1 to 100');
+  if (Result < 1) or (Result > 100) then
+    FailUsage('JPEG quality must be from 1 to 100');
+end;
+
 procedure ParseOptions(out Opt: TOptions);
 var
   I: Integer;
   A: String;
 begin
   FillChar(Opt, SizeOf(Opt), 0);
+  Opt.JPEGQuality := DefaultJPEGQuality;
 
   I := 1;
   while I <= ParamCount do
@@ -93,12 +104,10 @@ begin
       '-o', '--output':
         Opt.OutputFile := NeedValue(A, I);
 
+      '-q', '--quality', '--jpeg-quality':
+        Opt.JPEGQuality := ParseQuality(NeedValue(A, I));
+
     else
-      { Convenience form:
-          lutifer input.jpg lut.png out.png
-        This keeps the short form useful without making the documented
-        -i/-l/-o interface ambiguous.
-      }
       if (A <> '') and (A[1] <> '-') then
       begin
         if Opt.InputFile = '' then
@@ -131,75 +140,54 @@ begin
     raise Exception.CreateFmt('%s file not found: %s', [What, FileName]);
 end;
 
-function IsProbablyHaldClut(ABitmap: TBitmap; out Range: Integer): Boolean;
-var
-  Pixels, Cube: Double;
+function NewImage: TFPMemoryImage;
 begin
-  Result := False;
-  Range := 0;
-
-  if (ABitmap = nil) or (ABitmap.Width <= 0) or (ABitmap.Height <= 0) then
-    Exit;
-
-  Pixels := Double(ABitmap.Width) * Double(ABitmap.Height);
-  Cube := Power(Pixels, 1.0 / 3.0);
-  Range := Round(Cube);
-
-  Result :=
-    (Range >= 2) and
-    (Int64(Range) * Int64(Range) * Int64(Range) =
-      Int64(ABitmap.Width) * Int64(ABitmap.Height));
+  Result := TFPMemoryImage.Create(0, 0);
 end;
 
-procedure LoadBitmapFromAnyFile(ABitmap: TBitmap; const AFileName: String);
-var
-  Pic: TPicture;
+procedure LoadImage(AImage: TFPMemoryImage; const AFileName: String);
 begin
-  Pic := TPicture.Create;
-  try
-    Pic.LoadFromFile(AFileName);
-
-    if (Pic.Width <= 0) or (Pic.Height <= 0) or (Pic.Graphic = nil) then
-      raise Exception.Create('unsupported or empty image: ' + AFileName);
-
-    ABitmap.SetSize(Pic.Width, Pic.Height);
-    ABitmap.Canvas.Brush.Color := clBlack;
-    ABitmap.Canvas.FillRect(0, 0, ABitmap.Width, ABitmap.Height);
-    ABitmap.Canvas.Draw(0, 0, Pic.Graphic);
-  finally
-    Pic.Free;
-  end;
+  AImage.LoadFromFile(AFileName);
+  if (AImage.Width <= 0) or (AImage.Height <= 0) then
+    raise Exception.Create('unsupported or empty image: ' + AFileName);
 end;
 
-procedure SaveBitmapToFile(ABitmap: TBitmap; const AFileName: String);
+procedure SaveImage(AImage: TFPMemoryImage; const AFileName: String; JPEGQuality: Integer);
 var
   Ext: String;
-  Png: TPortableNetworkGraphic;
-  Jpg: TJPEGImage;
+  Png: TFPWriterPNG;
+  Jpg: TFPWriterJPEG;
+  Bmp: TFPWriterBMP;
 begin
-  if (ABitmap = nil) or (ABitmap.Width <= 0) or (ABitmap.Height <= 0) then
-    raise Exception.Create('refusing to save an empty bitmap');
+  if (AImage = nil) or (AImage.Width <= 0) or (AImage.Height <= 0) then
+    raise Exception.Create('refusing to save an empty image');
 
   Ext := LowerCase(ExtractFileExt(AFileName));
 
-  if Ext = '.bmp' then
-    ABitmap.SaveToFile(AFileName)
-  else if (Ext = '.jpg') or (Ext = '.jpeg') then
+  if (Ext = '.jpg') or (Ext = '.jpeg') then
   begin
-    Jpg := TJPEGImage.Create;
+    Jpg := TFPWriterJPEG.Create;
     try
-      Jpg.Assign(ABitmap);
-      Jpg.SaveToFile(AFileName);
+      Jpg.CompressionQuality := JPEGQuality;
+      AImage.SaveToFile(AFileName, Jpg);
     finally
       Jpg.Free;
     end;
   end
+  else if Ext = '.bmp' then
+  begin
+    Bmp := TFPWriterBMP.Create;
+    try
+      AImage.SaveToFile(AFileName, Bmp);
+    finally
+      Bmp.Free;
+    end;
+  end
   else
   begin
-    Png := TPortableNetworkGraphic.Create;
+    Png := TFPWriterPNG.Create;
     try
-      Png.Assign(ABitmap);
-      Png.SaveToFile(AFileName);
+      AImage.SaveToFile(AFileName, Png);
     finally
       Png.Free;
     end;
@@ -209,8 +197,8 @@ end;
 procedure Run;
 var
   Opt: TOptions;
-  InputBmp: TBitmap;
-  LutBmp: TBitmap;
+  InputImg: TFPMemoryImage;
+  LutImg: TFPMemoryImage;
   Range: Integer;
 begin
   ParseOptions(Opt);
@@ -218,41 +206,41 @@ begin
   CheckReadableFile(Opt.InputFile, 'input');
   CheckReadableFile(Opt.LutFile, 'LUT');
 
-  InputBmp := TBitmap.Create;
-  LutBmp := TBitmap.Create;
+  InputImg := NewImage;
+  LutImg := NewImage;
   try
     if Opt.Verbose then
       WriteLn('loading input: ', Opt.InputFile);
-    LoadBitmapFromAnyFile(InputBmp, Opt.InputFile);
+    LoadImage(InputImg, Opt.InputFile);
 
     if Opt.Verbose then
       WriteLn('loading LUT: ', Opt.LutFile);
-    LoadBitmapFromAnyFile(LutBmp, Opt.LutFile);
+    LoadImage(LutImg, Opt.LutFile);
 
-    if not IsProbablyHaldClut(LutBmp, Range) then
+    if not IsProbablyHaldClut(LutImg, Range) then
       raise Exception.CreateFmt(
         'LUT dimensions do not look like a Hald CLUT: %dx%d',
-        [LutBmp.Width, LutBmp.Height]
+        [LutImg.Width, LutImg.Height]
       );
 
     if Opt.Verbose then
     begin
-      WriteLn('input size: ', InputBmp.Width, 'x', InputBmp.Height);
-      WriteLn('Hald CLUT range: ', Range, ' (', LutBmp.Width, 'x', LutBmp.Height, ')');
-      WriteLn('applying LUT using haldclut_laz / MTProcs...');
+      WriteLn('input size: ', InputImg.Width, 'x', InputImg.Height);
+      WriteLn('Hald CLUT range: ', Range, ' (', LutImg.Width, 'x', LutImg.Height, ')');
+      WriteLn('applying LUT using headless fcl-image / MTProcs...');
     end;
 
-    ApplyHaldClut(InputBmp, LutBmp);
+    ApplyHaldClut(InputImg, LutImg);
 
     if Opt.Verbose then
       WriteLn('saving output: ', Opt.OutputFile);
-    SaveBitmapToFile(InputBmp, Opt.OutputFile);
+    SaveImage(InputImg, Opt.OutputFile, Opt.JPEGQuality);
 
     if Opt.Verbose then
       WriteLn('done');
   finally
-    LutBmp.Free;
-    InputBmp.Free;
+    LutImg.Free;
+    InputImg.Free;
   end;
 end;
 

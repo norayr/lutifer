@@ -5,10 +5,11 @@ unit haldclut;
 interface
 
 uses
-  Classes, SysUtils, Math, Graphics, FPImage, IntfGraphics;
+  Classes, SysUtils, Math, FPImage;
 
-procedure ApplyHaldClut(ABitmap, AHaldClut: TBitmap);
-function CloneBitmap(const ABitmap: TBitmap): TBitmap;
+procedure ApplyHaldClut(AImage, AHaldClut: TFPCustomImage);
+function HaldClutRange(AHaldClut: TFPCustomImage): Integer;
+function IsProbablyHaldClut(AHaldClut: TFPCustomImage; out Range: Integer): Boolean;
 
 implementation
 
@@ -20,8 +21,8 @@ type
 
   PHaldWork = ^THaldWork;
   THaldWork = record
-    SrcImg: TLazIntfImage;
-    ClutImg: TLazIntfImage;
+    SrcImg: TFPCustomImage;
+    ClutImg: TFPCustomImage;
     Range: Integer;
     Width: Integer;
     Height: Integer;
@@ -87,7 +88,7 @@ begin
   if PY >= H then PY := H - 1;
 end;
 
-function FetchClutColors(ClutImg: TLazIntfImage; Range: Integer;
+function FetchClutColors(ClutImg: TFPCustomImage; Range: Integer;
   R, G, B: Double): TClutColors;
 var
   X, Y, Z, XN, YN, ZN: Integer;
@@ -108,11 +109,25 @@ begin
   ClutPoint(XN, YN, ZN, Range, ClutImg.Width, ClutImg.Height, PX, PY); Result[7] := ClutImg.Colors[PX, PY];
 end;
 
-function CloneBitmap(const ABitmap: TBitmap): TBitmap;
+function HaldClutRange(AHaldClut: TFPCustomImage): Integer;
+var
+  Pixels: Double;
 begin
-  Result := TBitmap.Create;
-  if Assigned(ABitmap) then
-    Result.Assign(ABitmap);
+  Result := 0;
+  if (AHaldClut = nil) or (AHaldClut.Width <= 0) or (AHaldClut.Height <= 0) then
+    Exit;
+
+  Pixels := Double(AHaldClut.Width) * Double(AHaldClut.Height);
+  Result := Round(Power(Pixels, 1.0 / 3.0));
+end;
+
+function IsProbablyHaldClut(AHaldClut: TFPCustomImage; out Range: Integer): Boolean;
+begin
+  Range := HaldClutRange(AHaldClut);
+  Result :=
+    (Range >= 2) and
+    (Int64(Range) * Int64(Range) * Int64(Range) =
+      Int64(AHaldClut.Width) * Int64(AHaldClut.Height));
 end;
 
 procedure ApplyHaldClutToPixel(Work: PHaldWork; PixelIndex: PtrInt); inline;
@@ -154,48 +169,34 @@ begin
     ApplyHaldClutToPixel(Work, P);
 end;
 
-procedure ApplyHaldClut(ABitmap, AHaldClut: TBitmap);
+procedure ApplyHaldClut(AImage, AHaldClut: TFPCustomImage);
 var
-  SrcImg, ClutImg: TLazIntfImage;
-  Range: Integer;
   Work: THaldWork;
   BlockCount, BlockSize: PtrInt;
 begin
-  if (ABitmap = nil) or (AHaldClut = nil) then Exit;
-  if (ABitmap.Width <= 0) or (ABitmap.Height <= 0) then Exit;
+  if (AImage = nil) or (AHaldClut = nil) then Exit;
+  if (AImage.Width <= 0) or (AImage.Height <= 0) then Exit;
   if (AHaldClut.Width <= 0) or (AHaldClut.Height <= 0) then Exit;
 
-  Range := Round(Power(AHaldClut.Width * AHaldClut.Height, 1.0 / 3.0));
-  if Range < 2 then Exit;
+  if not IsProbablyHaldClut(AHaldClut, Work.Range) then
+    raise Exception.CreateFmt('LUT dimensions do not look like a Hald CLUT: %dx%d',
+      [AHaldClut.Width, AHaldClut.Height]);
 
-  SrcImg := ABitmap.CreateIntfImage;
-  try
-    ClutImg := AHaldClut.CreateIntfImage;
-    try
-      Work.SrcImg := SrcImg;
-      Work.ClutImg := ClutImg;
-      Work.Range := Range;
-      Work.Width := SrcImg.Width;
-      Work.Height := SrcImg.Height;
-      Work.PixelCount := PtrInt(SrcImg.Width) * PtrInt(SrcImg.Height);
+  Work.SrcImg := AImage;
+  Work.ClutImg := AHaldClut;
+  Work.Width := AImage.Width;
+  Work.Height := AImage.Height;
+  Work.PixelCount := PtrInt(AImage.Width) * PtrInt(AImage.Height);
 
-      if Work.PixelCount <= 0 then Exit;
+  if Work.PixelCount <= 0 then Exit;
 
-      ProcThreadPool.CalcBlockSize(Work.PixelCount, BlockCount, BlockSize);
-      Work.BlockSize := BlockSize;
+  ProcThreadPool.CalcBlockSize(Work.PixelCount, BlockCount, BlockSize);
+  Work.BlockSize := BlockSize;
 
-      if BlockCount <= 1 then
-        ApplyHaldClutBlock(0, @Work, nil)
-      else
-        ProcThreadPool.DoParallel(@ApplyHaldClutBlock, 0, BlockCount - 1, @Work);
-
-      ABitmap.LoadFromIntfImage(SrcImg);
-    finally
-      ClutImg.Free;
-    end;
-  finally
-    SrcImg.Free;
-  end;
+  if BlockCount <= 1 then
+    ApplyHaldClutBlock(0, @Work, nil)
+  else
+    ProcThreadPool.DoParallel(@ApplyHaldClutBlock, 0, BlockCount - 1, @Work);
 end;
 
 end.

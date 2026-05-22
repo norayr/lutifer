@@ -3,6 +3,7 @@ UNITDIR ?= build/units
 OUTFILE ?= lutifer
 FPC ?= fpc
 FPCSRC ?= /usr/lib/fpc/3.2.2/source
+
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
@@ -25,20 +26,16 @@ endif
 PARAMS = \
   -FU$(UNITDIR) \
   -MObjFPC -Scgi \
-  -O1 -gl \
+  -O2 -Xs -XX \
   -vewnhi -l \
-  -Fu$(LAZARUS)/lcl/units/$(ARCH) \
-  -Fu$(LAZARUS)/lcl/units/$(ARCH)/gtk2 \
-  -Fu$(LAZARUS)/components/lazutils/lib/$(ARCH) \
-  -Fu$(LAZARUS)/packager/units/$(ARCH) \
   -Fu$(LAZARUS)/components/multithreadprocs/lib/$(ARCH) \
+  -Fu$(LAZARUS)/components/lazutils/lib/$(ARCH) \
   -Fu$(FPCSRC)/packages/fcl-image/src \
   -Fu$(FPCSRC)/packages/fcl-base/src \
   -Fu. \
-  -dLCL -dLCLgtk2 \
   -o$(OUTFILE)
 
-.PHONY: all clean show
+.PHONY: all clean show debug
 
 all: $(OUTFILE)
 
@@ -53,7 +50,11 @@ show:
 	@echo UNAME_M=$(UNAME_M)
 	@echo ARCH=$(ARCH)
 	@echo LAZARUS=$(LAZARUS)
+	@echo FPCSRC=$(FPCSRC)
+
+debug: PARAMS += -O1 -gl
+
+debug: clean all
 
 clean:
 	rm -rf build $(OUTFILE)
-
